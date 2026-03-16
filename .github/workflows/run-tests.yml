@@ -1,0 +1,17 @@
+name: run-tests
+on: [push]
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      # Check AUTHORS file, only for commits made by students
+      - name: Check AUTHORS file
+        if: |-
+          !contains(fromJSON('["Kostas Chatzikokolakis", "Sarantis Paskalis", "github-classroom[bot]"]'), github.event.commits[0].author.name)
+        run: |-
+          grep -P  '^sdi\d\d00\d\d\d,[\w-]+,[^,]*$' AUTHORS || (echo INVALID AUTHORS FILE; exit 1)
+
+      - run: sudo apt-get update && sudo apt-get install -y libgl-dev libasound2-dev
+      - run: make
