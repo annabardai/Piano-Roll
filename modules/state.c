@@ -194,12 +194,38 @@ double state_total_duration(State state) {
 
 List state_displayed_notes(State state, double time_window) {
 	// Προς υλοποίηση
-	return NULL;
+	assert(state != NULL);
+	//return a view of the original MIDI events
+	List displayed_notes = list_create(NULL);	//the events will be freed when the state is destroyed
+	double current_time= state->info.time;
+	double end_time= current_time + time_window;
+	//the MIDI events are already sorted by time so we keep the correct order by inserting at the end of the list
+	for(ListNode node = list_first(state->midi_file->events); node != LIST_EOF; node = list_next(state->midi_file->events, node)){
+		MidiEvent event = list_node_value(state->midi_file->events, node);
+		//filter only note events in the future window, [current_time,current_time + time_window]
+		if(event->type == MIDI_NOTE && event->time >= current_time && event->time <= end_time)
+			list_insert_next(displayed_notes, list_last(displayed_notes), event);
+	}
+	return displayed_notes;
 }
 
 List state_playback_events(State state, double since) {
 	// Προς υλοποίηση
-	return NULL;
+	assert(state != NULL);
+	//return a view of the playback MIDI events
+	List playback_events = list_create(NULL);
+	double current_time = state->info.time;
+	double start_time = current_time - since;
+
+	//palyback happens at the state->midi_events that contains the timeline of the game
+	for(ListNode node = list_first(state->midi_events); node != LIST_EOF; node = list_next(state->midi_events, node)){
+		MidiEvent event = list_node_value(state->midi_events, node);
+		//events that need to be played at the current time frame, [current-since,current]
+		if(event->time >= start_time && event->time <= current_time)
+			list_insert_next(playback_events, list_last(playback_events), event);
+	}
+
+	return playback_events;
 }
 
 void state_update(State state, KeyState ks, double elapsed_time) {

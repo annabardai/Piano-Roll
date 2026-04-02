@@ -68,12 +68,85 @@ void test_state_update() {
 	state_destroy(state);
 }
 
+//2. additional tests
+
+
+//a.checks if only MIDI_NOTE events are returned
+//b.checks if the events are in the correct time window
+//c.checks if order is preserved
+void test_state_displayed_notes(){
+	State state = state_create("test.mid");
+	TEST_ASSERT(state != NULL);
+	StateInfo info = state_info(state);
+
+	//at first time=0, so we check the first events
+	List notes = state_displayed_notes(state, 2.0);
+	TEST_ASSERT(notes != NULL);
+
+	double prev_time = -1.0;
+
+	for(ListNode node = list_first(notes); node != LIST_EOF; node = list_next(notes, node)){
+		MidiEvent event = list_node_value(notes, node);
+		TEST_ASSERT(event->type == MIDI_NOTE);
+		TEST_ASSERT(event->time >= info->time);
+		TEST_ASSERT(event->time <= info->time + 2.0);
+		TEST_ASSERT(event->time >= prev_time);	
+		prev_time = event->time;
+	}
+
+	//test again after changing the time
+	info->time = 5.0;
+	List notes2 = state_displayed_notes(state, 1.0);
+
+	for(ListNode node = list_first(notes2); node != LIST_EOF; node = list_next(notes2, node)){
+		MidiEvent event = list_node_value(notes2, node);
+		TEST_ASSERT(event->time >= 5.0);
+		TEST_ASSERT(event->time <= 6.0);
+	}
+	state_destroy(state);
+}
+
+//a.checks if the events are in the correct time window [time-since,time]
+//b.checks if order is preserved
+void test_state_playback_events(){
+	State state = state_create("test.mid");
+	TEST_ASSERT(state != NULL);
+
+	StateInfo info = state_info(state);
+
+	info->time = 10.0; 		//advance time to ensure events exist in the past window
+	List events = state_playback_events(state, 2.0);
+	TEST_ASSERT(events != NULL);
+
+	double prev_time = -1.0;
+	
+	for(ListNode node = list_first(events); node != LIST_EOF; node = list_next(events, node)){
+		MidiEvent event = list_node_value(events, node);
+		TEST_ASSERT(event->time >=8.0);
+		TEST_ASSERT(event->time <= 10.0);
+		TEST_ASSERT(event->time >= prev_time);	
+		prev_time = event->time;
+	}
+
+	//test again with smaller window
+	List events2 = state_playback_events(state, 0.5);
+	
+	for(ListNode node = list_first(events2); node != LIST_EOF; node = list_next(events2, node)){
+		MidiEvent event = list_node_value(events2, node);
+		TEST_ASSERT(event->time >= 9.5);
+		TEST_ASSERT(event->time <= 10.0);
+	}
+	state_destroy(state);
+}
+
 
 // Λίστα με όλα τα tests προς εκτέλεση
 TEST_LIST = {
 	{ "test_state_create", test_state_create },
 	{ "test_state_basic_functions", test_state_basic_functions },
 	{ "test_state_update", test_state_update },
+	{ "test_state_displayed_notes", test_state_displayed_notes },
+	{ "test_state_playback_events", test_state_playback_events },
 
 	{ NULL, NULL } // τερματίζουμε τη λίστα με NULL
 };
