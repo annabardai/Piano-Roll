@@ -159,7 +159,7 @@ State state_create(String midi_file) {
 
 StateInfo state_info(State state) {
 	// Προς υλοποίηση
-	return NULL;
+	return &state->info;
 }
 
 int state_playing_channel(State state) {
@@ -172,7 +172,8 @@ int state_playing_channel(State state) {
 	// οποίο δείχνει το recording_index.
 
 	// Προς υλοποίηση
-	return 0;
+	Clip clip = vector_get_at(state->clips, state->recording_index);
+	return clip->channel;
 }
 
 double state_measure_duration(State state) {
@@ -182,7 +183,13 @@ double state_measure_duration(State state) {
 
 double state_total_duration(State state) {
 	// Προς υλοποίηση
-	return 0.0;
+	double total_duration = 0.0;
+	for(ListNode node = list_first(state->midi_file->events); node != LIST_EOF; node = list_next(state->midi_file->events, node)){
+		MidiEvent event = list_node_value(state->midi_file->events, node);
+		if(event->time > total_duration)	//we do not sum the duration of each event because they might occure at the same time, we look at the time of the last event
+			total_duration = event->time;
+	}
+	return total_duration;
 }
 
 List state_displayed_notes(State state, double time_window) {
@@ -201,4 +208,13 @@ void state_update(State state, KeyState ks, double elapsed_time) {
 
 void state_destroy(State state) {
 	// Προς υλοποίηση
+	if(state == NULL)
+		return;		//nothing to destroy
+	if(state->midi_file != NULL)
+		k08midi_file_destroy(state->midi_file);		//free through the the library as it contains internal structures 
+	if(state->midi_events != NULL)
+		list_destroy(state->midi_events);
+	if(state->clips != NULL)
+		vector_destroy(state->clips);
+	free(state);	//free the struct itself
 }
