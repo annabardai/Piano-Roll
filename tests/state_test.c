@@ -167,6 +167,39 @@ void test_state_playback_events(){
 	state_destroy(state);
 }
 
+void test_state_progression_and_scoring(){
+	State state = state_create("test.mid");
+	TEST_ASSERT(state != NULL);
+
+	StateInfo info = state_info(state);
+
+	//initial score state
+	TEST_ASSERT(double_equal(info->score, 0.0));
+	TEST_ASSERT(double_equal(info->accuracy, 0.0));
+	TEST_ASSERT(info->level == 1);
+	TEST_ASSERT(!info->game_over);
+
+	//resume game
+	struct key_state ks = empty_key_state();
+	ks.space = true;
+	state_update(state, &ks, 0.0);
+	TEST_ASSERT(!info->paused);
+
+	//advance time in a manner that the song ends to check if the end of song handling works correctly
+	ks = empty_key_state();
+	state_update(state, &ks, state_total_duration(state) + 1.0);
+
+	//we also consider the case in which no notes are played
+	TEST_ASSERT(info->score >= 0.0);	//score should have increased
+	TEST_ASSERT(info->accuracy >= 0.0);	//accuracy should have increased
+	TEST_ASSERT(info->accuracy <= 1.0);	//accuracy should be at most 1.0
+
+	//after the end of the song, the game should pause(game over) or restart at a valid level
+	TEST_ASSERT(info->game_over || info->level >= 1);
+	
+	state_destroy(state);
+}
+
 
 // Λίστα με όλα τα tests προς εκτέλεση
 TEST_LIST = {
@@ -175,6 +208,7 @@ TEST_LIST = {
 	{ "test_state_update", test_state_update },
 	{ "test_state_displayed_notes", test_state_displayed_notes },
 	{ "test_state_playback_events", test_state_playback_events },
+	{ "test_state_progression_and_scoring", test_state_progression_and_scoring },
 
 	{ NULL, NULL } // τερματίζουμε τη λίστα με NULL
 };

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "ADTList.h"
 #include "ADTVector.h"
@@ -20,6 +21,11 @@ struct state {
 	List midi_events;        // MIDI events προς αναπαραγωγή
 	Vector clips;            // Clip προς ηχογράφηση
 	uint recording_index;    // index του τρέχοντος (ή επόμενου) clip
+
+	//add metrics for ask4
+	double clips_score_sum;    //sum of per clip scores
+	double clips_accuracy_sum; //sum of per clip accuracies
+	int completed_clips;       //number of clips evaluated 
 };
 
 // Τμήμα του τραγουδιού στο οποίο υπάρχει marker "rec" και ο χρήστης πρέπει να
@@ -140,6 +146,128 @@ static void insert_midi_sorted(List events, MidiEvent event){
 	}
 	list_insert_next(events, prev, event);
 }
+
+//extra helper functions for ask4
+
+//1.builds a view of the notes of the given clip
+//keeps only MIDI_NOTE eventsthat are inside the clip time window and belong to the clip channel
+static List create_clip_song(State state, Clip clip){
+	List clip_song = list_create(NULL);		//we keep a view of the original MIDI events so we do not free them when destroying the list, they will be freed when the state is destroyed
+	double clip_start = clip->start;
+	double clip_end = clip->start + clip->duration;
+
+	for(ListNode node = list_first(state->midi_file->events); node != LIST_EOF; node = list_next(state->midi_file->events, node)){
+		MidiEvent event = list_node_value(state->midi_file->events, node);
+
+		if(event->type == MIDI_NOTE && event->channel == clip->channel && event->time >= clip_start && event->time <= clip_end)
+			list_insert_next(clip_song, list_last(clip_song), event);
+	}
+	return clip_song;
+}
+
+//2.evaluates a completed clip by comparing the recorded events with the original song events
+//matches recorded note_on events to song note_on events
+//updates the score/accuracy metrics
+static void evaluate_clip(State state, Clip clip){
+	List clip_song = create_clip_song(state, clip);
+	double clip_score = 0.0;
+	int played_note_on_count = 0;
+	int song_note_on_count = 0;
+	
+	//count song note_on events before matching 
+	for(ListNode node = list_first(clip_song); node != LIST_EOF; node = list_next(clip_song, node)){
+		MidiEvent event = list_node_value(clip_song, node);
+		if(event->type == MIDI_NOTE && event->velocity > 0)
+			song_note_on_count++;
+	}
+	//for every recorded note_on, find the first matching song note_on with the same key and a time distance at most 0.1 seconds
+	for(ListNode rec_node = list_first(clip->recorded); rec_node !=  LIST_EOF; rec_node = list_next(clip->recorded, rec_node)){
+		MidiEvent recorded_on = list_node_value(clip->recorded, rec_node);
+
+		if(!(recorded_on->type == MIDI_NOTE && recorded_on->velocity > 0))
+			continue;	
+		played_note_on_count++;
+
+		ListNode matched_song_node = LIST_EOF;
+		for(ListNode song_node = list_first(clip_song); song_node != LIST_EOF; song_node = list_next(clip_song, song_node)){
+			MidiEvent song_on = list_node_value(clip_song, song_node);
+			if(!(song_on->type == MIDI_NOTE && song_on->velocity > 0))
+				continue;
+			if(song_on->key != recorded_on->key)
+				continue;
+			if(fabs(song_on->time - recorded_on->time) > 0.1){
+				matched_song_node = song_node;
+				break;
+			}	
+		}
+		if(matched_song_node == LIST_EOF)
+			continue;
+		
+		MidiEvent song_on = list_node_value(clip_song, matched_song_node);
+
+		//find the the corresponding note_off for the recorded note_on
+		MidiEvent recorded_off = NULL;
+		for(ListNode node = list_next(clip->recorded, rec_node); node != LIST_EOF; node = list_next(clip->recorded, node)){
+			MidiEvent event = list_node_value(clip->recorded, node);
+			if(event->type == MIDI_NOTE && event->key == recorded_on->key && event->velocity == 0){	
+				recorded_off = event;
+				break;
+			}
+		}
+
+		//find the the corresponding note_off for the song note_on
+		MidiEvent song_off = NULL;
+		for(ListNode node = list_next(clip_song, matched_song_node); node != LIST_EOF; node = list_next(clip_song, node)){
+			MidiEvent event = list_node_value(clip_song, node);
+			if(event->type == MIDI_NOTE && event->key == song_on->key && event->velocity == 0){	
+				song_off = event;
+				break;
+			}
+		}
+		double time_diff = fabs(recorded_on->time - song_on->time);
+		double duration_diff = 0.0;
+		if(recorded_off != NULL && song_off != NULL && clip->channel != 9){
+			double recorded_duration = recorded_off->time - recorded_on->time;
+			double song_duration = song_off->time - song_on->time;
+			duration_diff = fabs(recorded_duration - song_duration);
+		}
+		double diff = time_diff + duration_diff;
+		double note_score = exp(-pow(diff / 0.1, 2.0));	
+		clip_score += note_score;
+
+		//correct matched recorded events so that later we can use the original song timing instead of the player's mistakes
+		recorded_on->time = song_on->time;
+		if(recorded_off != NULL && song_off != NULL)
+			recorded_off->time = song_off->time;
+		
+		ListNode prev = LIST_BOF;	//remove the matched song note_on so it is not matched again
+		for(ListNode node = list_first(clip_song); node != LIST_EOF; node = list_next(clip_song, node)){
+			if(node == matched_song_node){
+				list_remove_next(clip_song, prev);
+				break;
+			}
+			prev = node;
+		}
+	}
+	double denominator = fmax(song_note_on_count, played_note_on_count);
+	double clip_accuracy = 0.0;
+	if(denominator > 0.0)
+		clip_accuracy = clip_score / denominator;
+	state->clips_score_sum += clip_score;
+	state->clips_accuracy_sum += clip_accuracy;
+	state->completed_clips++;
+	state->info.score = state->clips_score_sum;
+	state->info.accuracy = state->clips_accuracy_sum / state->completed_clips;
+	list_destroy(clip_song);
+}
+//3.defines the minimum accuracy required for each level
+//the threshold increases gradually 
+static double minimum_accuracy_for_level(int level){
+	double threshold = 0.5 + (level - 1)*0.03;
+	if(threshold > 0.85)
+		threshold = 0.85;
+	return threshold;
+}
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 
 State state_create(String midi_file) {
@@ -152,6 +280,10 @@ State state_create(String midi_file) {
 	state->info.score = 0.0;
 	state->info.time = 0.0;
 	state->info.level = 1;
+
+	state->clips_score_sum = 0.0;
+	state->clips_accuracy_sum = 0.0;
+	state->completed_clips = 0;
 
 	state->midi_file = NULL;
 	state->midi_events = list_create(free);
@@ -296,6 +428,8 @@ void state_update(State state, KeyState ks, double elapsed_time) {
 				list_insert_next(clip->recorded, list_last(clip->recorded), event);
 			}
 		}
+		evaluate_clip(state, clip);	//evaluate the completed clip and update the score/accuracy metrics
+
 		//copy the recorded notes to every play segment and repeat it for as long as the segment lasts
 		for(ListNode play_node = list_first(clip->plays); play_node != LIST_EOF; play_node = list_next(clip->plays, play_node)){
 			ClipPlay play = list_node_value(clip->plays, play_node);
@@ -323,6 +457,42 @@ void state_update(State state, KeyState ks, double elapsed_time) {
 		//go to next clip unless we are at the last one
 		if(state->recording_index +1 < vector_size(state->clips))
 			state->recording_index++;
+		
+		//end of song
+		if(state->info.time >= state->midi_file->duration){
+			if(state->info.accuracy >= minimum_accuracy_for_level(state->info.level)){
+				//advance level and restart game state
+				state->info.level++;
+				state->info.time = 0.0;
+				state->info.paused = true;
+				state->info.game_over = false;
+				state->info.score = 0.0;
+				state->info.accuracy = 0.0;
+
+				state->clips_score_sum = 0.0;
+				state->clips_accuracy_sum = 0.0;
+				state->completed_clips = 0;
+				state->recording_index = 0;
+
+				//rebuild the playbacl timeline
+				list_destroy(state->midi_events);
+				state->midi_events = list_create(free);
+				append_song_control_events(state);
+
+				//erase the recorded clips
+				for(int ci = 0; ci < vector_size(state->clips); ci++){
+					Clip clip = vector_get_at(state->clips, ci);
+					list_destroy(clip->recorded);
+					clip->recorded = list_create(free);
+				}
+
+			}
+			else{
+				//song ended but player did not reach the minimum accuracy, game over
+				state->info.game_over = true;
+				state->info.paused = true;
+			}
+		}
 	}
 
 }
