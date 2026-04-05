@@ -127,6 +127,19 @@ static void create_clips(State state) {
 		}
 	}
 }
+
+//extra helper function for ask3
+//inserts an event to the playback timeline and preserves time order
+static void insert_midi_sorted(List events, MidiEvent event){
+	ListNode prev = LIST_BOF;
+	for(ListNode node = list_first(events); node != LIST_EOF; node = list_next(events, node)){
+		MidiEvent current = list_node_value(events, node);
+		if(current->time > event->time)		//found the first event that is after the new event, we insert before it
+			break;
+		prev = node;
+	}
+	list_insert_next(events, prev, event);
+}
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 
 State state_create(String midi_file) {
@@ -230,6 +243,88 @@ List state_playback_events(State state, double since) {
 
 void state_update(State state, KeyState ks, double elapsed_time) {
 	// Προς υλοποίηση
+	assert(state != NULL);
+
+	state->info.game_over = false;	//reset game_over flag (becomes true only for one frame)
+	double prev_time = state->info.time;
+
+	//pause and resume handling
+	if(ks->space)
+		state->info.paused = !state->info.paused;	//pause state
+	//frame stepping
+	bool step = false;
+	if(state->info.paused && ks->n)
+		step = true;	//exactly one frame update while paused
+	bool advance_frame = !state->info.paused || step;	
+	if(!advance_frame)
+		return;	//if we are paused and not stepping, we do not update the state
+	//time progression
+	state->info.time += elapsed_time;
+
+	//clip implementation
+
+	Clip clip = vector_get_at(state->clips, state->recording_index);
+	double clip_end_time = clip->start + clip->duration;
+
+	//record note changes to the active clip while its recording window is open
+	if(state->info.time >= clip->start && state->info.time <= clip_end_time){
+		for(int key = 0; key < 128; key++){
+			if(ks->changed_keys[key] >=0){	//if the key changed
+				MidiEvent event = malloc(sizeof(*event));
+				assert(event != NULL);
+				event->type = MIDI_NOTE;
+				event->time = state->info.time;
+				event->channel = clip->channel;
+				event->key = key;
+				event->velocity = ks->changed_keys[key];	//velocity is 0 for note off and >0 for note on
+				list_insert_next(clip->recorded, list_last(clip->recorded), event);		//add the event to the recorded events of the clip
+			}
+		}
+	}
+	//finalize the clip when the recording window is closed
+	if(prev_time <= clip_end_time && state->info.time > clip_end_time){
+		//note_off events go to the end so that recorded notes do not remain open 
+		for(int key = 0; key< 128; key++){
+			if(ks->active_keys[key] > 0){
+				MidiEvent event = malloc(sizeof(*event));
+				assert(event != NULL);
+				event->type = MIDI_NOTE;
+				event->time = clip_end_time;
+				event->channel = clip->channel;
+				event->key = key;
+				event->velocity = 0;	//note off
+				list_insert_next(clip->recorded, list_last(clip->recorded), event);
+			}
+		}
+		//copy the recorded notes to every play segment and repeat it for as long as the segment lasts
+		for(ListNode play_node = list_first(clip->plays); play_node != LIST_EOF; play_node = list_next(clip->plays, play_node)){
+			ClipPlay play = list_node_value(clip->plays, play_node);
+			double play_end_time = play->start + play->duration;
+			for(double offset = 0.0; offset < play->duration; offset += clip->duration){
+				//repeat the clip every clip->duration seconds in the play segment
+				for(ListNode rec_node = list_first(clip->recorded); rec_node != LIST_EOF; rec_node = list_next(clip->recorded, rec_node)){
+					MidiEvent recorded = list_node_value(clip->recorded, rec_node);
+					//convert from clip-local time to play-segment time
+					double relative_time = recorded->time - clip->start;
+					double new_time = play->start + offset + relative_time;
+
+					//ignore events that are outside the play segment
+					if(new_time > play_end_time)
+						continue;
+
+					MidiEvent clone = malloc(sizeof(*clone));
+					assert(clone != NULL);
+					*clone = *recorded;	//clone the recorded event
+					clone->time = new_time;	//adjust the time to the play segment
+					insert_midi_sorted(state->midi_events, clone);	//insert the event to the playback timeline
+				}
+			}
+		}
+		//go to next clip unless we are at the last one
+		if(state->recording_index +1 < vector_size(state->clips))
+			state->recording_index++;
+	}
+
 }
 
 void state_destroy(State state) {

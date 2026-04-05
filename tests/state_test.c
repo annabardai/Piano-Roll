@@ -58,12 +58,40 @@ void test_state_update() {
 	State state = state_create("test.mid");
 	TEST_ASSERT(state != NULL);
 
-	// Παράδειγμα:
+	StateInfo info = state_info(state);
+
+	//the game starts paused
+	TEST_ASSERT(info->paused);
+	TEST_ASSERT(double_equal(info->time, 0.0));
+
+	//pressing space should toggle pause
 	struct key_state ks = empty_key_state();
 	ks.space = true;
-
 	state_update(state, &ks, 0.0);
-	// TEST_ASSERT(!state_info(state)->paused);
+	TEST_ASSERT(!info->paused);
+	TEST_ASSERT(double_equal(info->time, 0.0));
+
+	//time should advance normally while running
+	ks = empty_key_state();
+	state_update(state, &ks, 0.5);
+	TEST_ASSERT(double_equal(info->time, 0.5));
+
+	//pressing space again should pause the game
+	ks = empty_key_state();
+	ks.space = true;
+	state_update(state, &ks, 0.0);
+	TEST_ASSERT(info->paused);
+
+	//time should not advance while paused
+	ks = empty_key_state();
+	state_update(state, &ks, 1.0);
+	TEST_ASSERT(double_equal(info->time, 0.5));
+
+	//frame stepping does exactly one update while paused
+	ks = empty_key_state();
+	ks.n = true;
+	state_update(state, &ks, 0.25);
+	TEST_ASSERT(double_equal(info->time, 0.75));
 
 	state_destroy(state);
 }
