@@ -7,8 +7,11 @@
 
 #include "ADTList.h"
 #include "ADTVector.h"
+#include "ADTMap.h"
 #include "k08midi.h"
 #include "state.h"
+
+#define TIME_BUCKET 0.1
 
 
 // Οι ολοκληρωμένες πληροφορίες της κατάστασης του παιχνιδιού.
@@ -26,6 +29,9 @@ struct state {
 	double clips_score_sum;    //sum of per clip scores
 	double clips_accuracy_sum; //sum of per clip accuracies
 	int completed_clips;       //number of clips evaluated 
+
+    Map displayed_index;   //song MIDI_NOTE events indexed by time bucket 
+    Map playback_index;    //playback events indexed by time bucket 
 };
 
 // Τμήμα του τραγουδιού στο οποίο υπάρχει marker "rec" και ο χρήστης πρέπει να
@@ -100,7 +106,7 @@ static void append_song_control_events(State state) {
 		if (event->type == MIDI_CONTROL_CHANGE || event->type == MIDI_PROGRAM_CHANGE) {
 			MidiEvent clone = malloc(sizeof(*clone));
 			*clone = *event; // clone
-			list_insert_next(state->midi_events, list_last(state->midi_events), clone);
+			add_playback_event(state, clone); 
 		}
 	}
 }
@@ -134,18 +140,6 @@ static void create_clips(State state) {
 	}
 }
 
-//extra helper function for ask3
-//inserts an event to the playback timeline and preserves time order
-static void insert_midi_sorted(List events, MidiEvent event){
-	ListNode prev = LIST_BOF;
-	for(ListNode node = list_first(events); node != LIST_EOF; node = list_next(events, node)){
-		MidiEvent current = list_node_value(events, node);
-		if(current->time > event->time)		//found the first event that is after the new event, we insert before it
-			break;
-		prev = node;
-	}
-	list_insert_next(events, prev, event);
-}
 
 //extra helper functions for ask4
 
@@ -268,6 +262,79 @@ static double minimum_accuracy_for_level(int level){
 		threshold = 0.85;
 	return threshold;
 }
+
+/////////////////////////////////////////
+////////////////////////////////////////
+//bucket helpers 
+static int compare_ints(Pointer a, Pointer b){ 
+    int x = *(int*)a; 
+    int y = *(int*)b; 
+    if (x < y) return -1; 
+    if (x > y) return 1; 
+    return 0; 
+} 
+
+static void destroy_bucket_list(Pointer value){ 
+    if(value != NULL) 
+        list_destroy(value); 
+} 
+
+static int bucket_index(double time){ 
+    if(time < 0.0) 
+        time = 0.0; 
+    return (int)floor(time / TIME_BUCKET); 
+} 
+
+static List get_or_create_bucket(Map map, int index){ 
+    List bucket = map_find(map, &index); 
+    if(bucket != NULL) 
+        return bucket; 
+    int* key = malloc(sizeof(*key)); 
+    assert(key != NULL); 
+    *key = index; 
+
+    bucket = list_create(NULL); 
+    map_insert(map, key, bucket); 
+    return bucket; 
+} 
+
+static void insert_event_in_bucket(List bucket, MidiEvent event){ 
+    ListNode prev = LIST_BOF; 
+    for(ListNode node = list_first(bucket); node != LIST_EOF; node = list_next(bucket, node)){ 
+        MidiEvent ev = list_node_value(bucket, node); 
+        //keep each bucket sorted by time so range queries preserve order
+        if(event->time < ev->time) 
+            break; 
+        prev = node; 
+    } 
+    list_insert_next(bucket, prev, event); 
+} 
+
+//index helpers 
+static void index_displayed_note(State state, MidiEvent event){ 
+    int idx = bucket_index(event->time); 
+    List bucket = get_or_create_bucket(state->displayed_index, idx); 
+    insert_event_in_bucket(bucket, event); 
+} 
+
+ 
+
+static void add_playback_event(State state, MidiEvent event){ 
+    list_insert_next(state->midi_events, list_last(state->midi_events), event); 
+    int idx = bucket_index(event->time); 
+    List bucket = get_or_create_bucket(state->playback_index, idx); 
+    insert_event_in_bucket(bucket, event); 
+} 
+
+ 
+
+static void build_displayed_index(State state){ 
+    for(ListNode node = list_first(state->midi_file->events); node != LIST_EOF; node = list_next(state->midi_file->events, node)){ 
+        MidiEvent event = list_node_value(state->midi_file->events, node); 
+        if(event->type == MIDI_NOTE) 
+            index_displayed_note(state, event); 
+    } 
+} 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 
 State state_create(String midi_file) {
@@ -294,6 +361,11 @@ State state_create(String midi_file) {
 	create_clips(state);
 	assert(vector_size(state->clips) > 0);
 	state->recording_index = 0;
+
+    state->displayed_index = map_create(compare_ints, free, destroy_bucket_list);
+    state->playback_index = map_create(compare_ints, free, destroy_bucket_list);
+
+    build_displayed_index(state);
 
 	list_destroy(state->midi_events);
 	state->midi_events = list_create(free);
@@ -344,13 +416,23 @@ List state_displayed_notes(State state, double time_window) {
 	List displayed_notes = list_create(NULL);	//the events will be freed when the state is destroyed
 	double current_time= state->info.time;
 	double end_time= current_time + time_window;
-	//the MIDI events are already sorted by time so we keep the correct order by inserting at the end of the list
-	for(ListNode node = list_first(state->midi_file->events); node != LIST_EOF; node = list_next(state->midi_file->events, node)){
-		MidiEvent event = list_node_value(state->midi_file->events, node);
-		//filter only note events in the future window, [current_time,current_time + time_window]
-		if(event->type == MIDI_NOTE && event->time >= current_time && event->time <= end_time)
-			list_insert_next(displayed_notes, list_last(displayed_notes), event);
-	}
+
+    int start_bucket = bucket_index(current_time); 
+    int end_bucket = bucket_index(end_time);
+
+    //we scan the buckets that are in the visible time window 
+    //order is preserved since we insert the events in the buckets sorted by time 
+    for(int b = start_bucket; b <= end_bucket; b++){ 
+        List bucket = map_find(state->displayed_index, &b); 
+        if(bucket == NULL) 
+            continue; 
+        for(ListNode node = list_first(bucket); node != LIST_EOF; node = list_next(bucket, node)){ 
+            MidiEvent event = list_node_value(bucket, node); 
+            if(event->time >= current_time && event->time <= end_time) 
+                list_insert_next(displayed_notes, list_last(displayed_notes), event); 
+        } 
+
+    } 
 	return displayed_notes;
 }
 
@@ -361,15 +443,24 @@ List state_playback_events(State state, double since) {
 	List playback_events = list_create(NULL);
 	double current_time = state->info.time;
 	double start_time = current_time - since;
+    if(start_time < 0.0) 
+        start_time = 0.0; 
 
-	//palyback happens at the state->midi_events that contains the timeline of the game
-	for(ListNode node = list_first(state->midi_events); node != LIST_EOF; node = list_next(state->midi_events, node)){
-		MidiEvent event = list_node_value(state->midi_events, node);
-		//events that need to be played at the current time frame, [current-since,current]
-		if(event->time >= start_time && event->time <= current_time)
-			list_insert_next(playback_events, list_last(playback_events), event);
-	}
+    int start_bucket = bucket_index(start_time); 
+    int end_bucket = bucket_index(current_time); 
 
+    //we scan only the buckets that inersect the palyback window 
+    //order is preserved since we insert the events in the buckets sorted by time 
+    for(int b = start_bucket; b <= end_bucket; b++){ 
+        List bucket = map_find(state->playback_index, &b); 
+        if(bucket == NULL) 
+            continue; 
+        for(ListNode node = list_first(bucket); node != LIST_EOF; node = list_next(bucket, node)){ 
+            MidiEvent event = list_node_value(bucket, node); 
+            if(event->time >= start_time && event->time <= current_time) 
+                list_insert_next(playback_events, list_last(playback_events), event); 
+        } 
+    } 
 	return playback_events;
 }
 
@@ -391,7 +482,8 @@ void state_update(State state, KeyState ks, double elapsed_time) {
 	if(!advance_frame)
 		return;	//if we are paused and not stepping, we do not update the state
 	//time progression
-	state->info.time += elapsed_time;
+	if(!state->info.paused || step)
+        state->info.time += elapsed_time;
 
 	//clip implementation
 
@@ -408,7 +500,7 @@ void state_update(State state, KeyState ks, double elapsed_time) {
 				event->time = state->info.time;
 				event->channel = clip->channel;
 				event->key = key;
-				event->velocity = ks->changed_keys[key];	//velocity is 0 for note off and >0 for note on
+				event->velocity = ks->active_keys[key];	//velocity is 0 for note off and >0 for note on
 				list_insert_next(clip->recorded, list_last(clip->recorded), event);		//add the event to the recorded events of the clip
 			}
 		}
@@ -450,7 +542,7 @@ void state_update(State state, KeyState ks, double elapsed_time) {
 					assert(clone != NULL);
 					*clone = *recorded;	//clone the recorded event
 					clone->time = new_time;	//adjust the time to the play segment
-					insert_midi_sorted(state->midi_events, clone);	//insert the event to the playback timeline
+					add_playback_event(state, clone);	//insert the event to the playback timeline
 				}
 			}
 		}
@@ -474,10 +566,14 @@ void state_update(State state, KeyState ks, double elapsed_time) {
 				state->completed_clips = 0;
 				state->recording_index = 0;
 
-				//rebuild the playbacl timeline
+				//rebuild the playbacl timeline for the new run
 				list_destroy(state->midi_events);
 				state->midi_events = list_create(free);
-				append_song_control_events(state);
+
+                map_destroy(state->playback_index);
+                state->playback_index = map_create(compare_ints, free, destroy_bucket_list);
+
+                append_song_control_events(state);
 
 				//erase the recorded clips
 				for(int ci = 0; ci < vector_size(state->clips); ci++){
@@ -507,5 +603,9 @@ void state_destroy(State state) {
 		list_destroy(state->midi_events);
 	if(state->clips != NULL)
 		vector_destroy(state->clips);
+    if(state->displayed_index != NULL)
+        map_destroy(state->displayed_index);
+    if(state->playback_index != NULL)
+        map_destroy(state->playback_index);
 	free(state);	//free the struct itself
 }
