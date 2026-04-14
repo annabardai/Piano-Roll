@@ -11,7 +11,7 @@
 #include "k08midi.h"
 #include "state.h"
 
-#define TIME_BUCKET 0.1
+#define TIME_BUCKET 0.1 	//discretize time into buckets to accelerate range queries
 
 
 // Οι ολοκληρωμένες πληροφορίες της κατάστασης του παιχνιδιού.
@@ -30,6 +30,7 @@ struct state {
 	double clips_accuracy_sum; //sum of per clip accuracies
 	int completed_clips;       //number of clips evaluated 
 
+	//optimizaton for ask5
     Map displayed_index;   //song MIDI_NOTE events indexed by time bucket 
     Map playback_index;    //playback events indexed by time bucket 
 };
@@ -279,12 +280,15 @@ static void destroy_bucket_list(Pointer value){
         list_destroy(value); 
 } 
 
+//converts a timestamp into a bucket index 
 static int bucket_index(double time){ 
     if(time < 0.0) 
         time = 0.0; 
     return (int)floor(time / TIME_BUCKET); 
 } 
 
+//returns the list corresponding to a given index
+//if it does not exist, it is created dynamically
 static List get_or_create_bucket(Map map, int index){ 
     List bucket = map_find(map, &index); 
     if(bucket != NULL) 
@@ -298,6 +302,7 @@ static List get_or_create_bucket(Map map, int index){
     return bucket; 
 } 
 
+//inserts an event into a bucket and preserves time order in it
 static void insert_event_in_bucket(List bucket, MidiEvent event){ 
     ListNode prev = LIST_BOF; 
     for(ListNode node = list_first(bucket); node != LIST_EOF; node = list_next(bucket, node)){ 
@@ -317,8 +322,7 @@ static void index_displayed_note(State state, MidiEvent event){
     insert_event_in_bucket(bucket, event); 
 } 
 
- 
-
+ //adds a playback event both to the global playback list and to the indexed structure
 static void add_playback_event(State state, MidiEvent event){ 
     list_insert_next(state->midi_events, list_last(state->midi_events), event); 
     int idx = bucket_index(event->time); 
@@ -326,8 +330,8 @@ static void add_playback_event(State state, MidiEvent event){
     insert_event_in_bucket(bucket, event); 
 } 
 
- 
-
+ //builds the index for displayed notes once during initialization
+ //reduces the cost of per-frame queries
 static void build_displayed_index(State state){ 
     for(ListNode node = list_first(state->midi_file->events); node != LIST_EOF; node = list_next(state->midi_file->events, node)){ 
         MidiEvent event = list_node_value(state->midi_file->events, node); 
@@ -375,7 +379,6 @@ State state_create(String midi_file) {
 }
 
 StateInfo state_info(State state) {
-	// Προς υλοποίηση
 	return &state->info;
 }
 
@@ -387,8 +390,7 @@ int state_playing_channel(State state) {
 	//
 	// Το κανάλι στο οποίο παίζει "live" ο χρήστης είναι το κανάλι του clip στο
 	// οποίο δείχνει το recording_index.
-
-	// Προς υλοποίηση
+   
 	Clip clip = vector_get_at(state->clips, state->recording_index);
 	return clip->channel;
 }
@@ -399,7 +401,6 @@ double state_measure_duration(State state) {
 }
 
 double state_total_duration(State state) {
-	// Προς υλοποίηση
 	double total_duration = 0.0;
 	for(ListNode node = list_first(state->midi_file->events); node != LIST_EOF; node = list_next(state->midi_file->events, node)){
 		MidiEvent event = list_node_value(state->midi_file->events, node);
@@ -410,7 +411,6 @@ double state_total_duration(State state) {
 }
 
 List state_displayed_notes(State state, double time_window) {
-	// Προς υλοποίηση
 	assert(state != NULL);
 	//return a view of the original MIDI events
 	List displayed_notes = list_create(NULL);	//the events will be freed when the state is destroyed
@@ -436,8 +436,7 @@ List state_displayed_notes(State state, double time_window) {
 	return displayed_notes;
 }
 
-List state_playback_events(State state, double since) {
-	// Προς υλοποίηση
+List state_playback_events(State state, double since){
 	assert(state != NULL);
 	//return a view of the playback MIDI events
 	List playback_events = list_create(NULL);
@@ -465,7 +464,6 @@ List state_playback_events(State state, double since) {
 }
 
 void state_update(State state, KeyState ks, double elapsed_time) {
-	// Προς υλοποίηση
 	assert(state != NULL);
 
 	state->info.game_over = false;	//reset game_over flag (becomes true only for one frame)
